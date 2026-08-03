@@ -1,0 +1,17 @@
+# Variables de entorno
+.env
+
+# Base de datos local
+data.db
+
+# Exportaciones generadas
+exports/
+
+# Bytecode de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+
+

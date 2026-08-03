@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from api.client import StratzClient
-from api.queries import MATCH_DATE_QUERY, RAMPAGES_QUERY
+from api.queries import LATEST_RAMPAGES_QUERY, MATCH_DATE_QUERY, RAMPAGES_QUERY
 from config import Config
 from repositories.hero_repository import HeroRepository
 from repositories.match_repository import MatchRepository
@@ -17,6 +17,28 @@ class RampageService:
         self.match_repository = match_repository
 
     def fetch_by_rampages(self) -> int:
+        return self._run_rampage_search(
+            query=RAMPAGES_QUERY,
+            bracket=Config.BRACKET,
+            take=Config.RAMPAGE_TAKE,
+            label="divine_inmortal",
+        )
+
+    def fetch_latest_rampages(self) -> int:
+        return self._run_rampage_search(
+            query=LATEST_RAMPAGES_QUERY,
+            bracket=None,
+            take=5,
+            label="últimos 5",
+        )
+
+    def _run_rampage_search(
+        self,
+        query: str,
+        bracket: str | None,
+        take: int,
+        label: str,
+    ) -> int:
         heroes = self.hero_repository.list_all()
         if not heroes:
             print("No hay héroes sincronizados. Ejecuta primero la sincronización.")
@@ -26,17 +48,14 @@ class RampageService:
         for hero in heroes:
             hero_id = hero["id"]
             hero_name = hero["display_name"]
-            print(f"[{hero_id}] {hero_name}: buscando rampages...")
+            print(f"[{hero_id}] {hero_name}: buscando rampages ({label})...")
 
             try:
-                result = self.client.execute(
-                    RAMPAGES_QUERY,
-                    {
-                        "heroId": hero_id,
-                        "bracketBasicIds": [Config.BRACKET],
-                        "take": Config.RAMPAGE_TAKE,
-                    },
-                )
+                variables: dict = {"heroId": hero_id, "take": take}
+                if bracket is not None:
+                    variables["bracketBasicIds"] = [bracket]
+
+                result = self.client.execute(query, variables)
                 rampages = result["heroStats"]["rampages"] or []
                 if not rampages:
                     print("  → Sin rampages encontrados.")

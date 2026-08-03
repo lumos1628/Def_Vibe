@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+import json
 import sqlite3
 from pathlib import Path
 from config import Config
@@ -15,6 +17,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS heroes (
                     id INTEGER PRIMARY KEY,
                     display_name TEXT NOT NULL,
+                    short_name TEXT NOT NULL,
                     synced_at TEXT NOT NULL
                 );
 
@@ -25,12 +28,38 @@ class Database:
                     played_at TEXT NOT NULL,
                     steam_account_id INTEGER NOT NULL,
                     extracted_at TEXT NOT NULL,
+                    parsed INTEGER NOT NULL DEFAULT 0,
+                    has_replay_data INTEGER NOT NULL DEFAULT 0,
+                    data_verified INTEGER NOT NULL DEFAULT 0,
+                    parse_requested_at TEXT,
+                    parse_request_count INTEGER NOT NULL DEFAULT 0,
+                    parse_job_id TEXT,
+                    parse_status TEXT DEFAULT 'pending',
+                    last_parse_attempt_at TEXT,
+                    unparseable INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY (hero_id) REFERENCES heroes(id),
                     UNIQUE (hero_id, match_id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_rampage_hero
                 ON rampage_matches(hero_id);
+
+                CREATE TABLE IF NOT EXISTS export_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id INTEGER NOT NULL,
+                    exported_at TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    UNIQUE(match_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS chat_wheels (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    all_chat INTEGER DEFAULT 0,
+                    synced_at TEXT NOT NULL
+                );
             """)
 
     def migrate(self) -> None:
@@ -41,6 +70,124 @@ class Database:
                 conn.execute(
                     "ALTER TABLE rampage_matches ADD COLUMN parsed INTEGER NOT NULL DEFAULT 0"
                 )
+            if "has_replay_data" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN has_replay_data INTEGER NOT NULL DEFAULT 0"
+                )
+            if "parse_requested_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN parse_requested_at TEXT"
+                )
+            if "parse_request_count" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN parse_request_count INTEGER NOT NULL DEFAULT 0"
+                )
+            if "unparseable" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN unparseable INTEGER NOT NULL DEFAULT 0"
+                )
+            if "parse_job_id" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN parse_job_id TEXT"
+                )
+            if "parse_status" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN parse_status TEXT DEFAULT 'pending'"
+                )
+            if "last_parse_attempt_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN last_parse_attempt_at TEXT"
+                )
+            if "data_verified" not in columns:
+                conn.execute(
+                    "ALTER TABLE rampage_matches ADD COLUMN data_verified INTEGER NOT NULL DEFAULT 0"
+                )
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rampage_parse_status ON rampage_matches(parse_status)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_rampage_last_attempt ON rampage_matches(last_parse_attempt_at)"
+            )
+
+            # Backfill has_replay_data from existing match_details JSON
+            if self.table_exists("match_details"):
+                cursor = conn.execute(
+                    "SELECT match_id, opendota_data FROM match_details"
+                )
+                for match_id, data_json in cursor.fetchall():
+                    try:
+                        data = json.loads(data_json)
+                    except json.JSONDecodeError:
+                        continue
+                    players = data.get("players") or []
+                    has_kills_log = any(
+                        isinstance(player.get("kills_log"), list) and len(player["kills_log"]) > 0
+                        for player in players
+                    )
+                    has_chat = isinstance(data.get("chat"), list) and len(data["chat"]) > 0
+                    has_replay = 1 if (has_kills_log or has_chat) else 0
+                    conn.execute(
+                        """
+                        UPDATE rampage_matches
+                        SET has_replay_data = ?
+                        WHERE match_id = ? AND has_replay_data = 0
+                        """,
+                        (has_replay, match_id),
+                    )
+
+            # Backfill parse_status based on existing flags
+            conn.execute(
+                """
+                UPDATE rampage_matches
+                SET parse_status = 'done'
+                WHERE has_replay_data = 1 AND (parse_status IS NULL OR parse_status = 'pending')
+                """
+            )
+            conn.execute(
+                """
+                UPDATE rampage_matches
+                SET parse_status = 'failed'
+                WHERE unparseable = 1 AND (parse_status IS NULL OR parse_status = 'pending')
+                """
+            )
+            conn.execute(
+                """
+                UPDATE rampage_matches
+                SET parse_status = 'pending'
+                WHERE parse_status IS NULL
+                """
+            )
+
+            # Backfill data_verified based on existing state
+            conn.execute(
+                """
+                UPDATE rampage_matches
+                SET data_verified = 1
+                WHERE data_verified = 0
+                  AND (has_replay_data = 1 OR unparseable = 1 OR parse_job_id IS NOT NULL OR parse_request_count > 0)
+                """
+            )
+
+            # Reset unparseable flag for recent matches so they can be retried
+            cutoff = datetime.now(timezone.utc) - timedelta(days=Config.MAX_REPLAY_AGE_DAYS)
+            conn.execute(
+                """
+                UPDATE rampage_matches
+                SET unparseable = 0,
+                    parse_status = 'pending'
+                WHERE unparseable = 1
+                  AND played_at >= ?
+                  AND has_replay_data = 0
+                """,
+                (cutoff.isoformat(),),
+            )
+
+            cursor = conn.execute("PRAGMA table_info(heroes)")
+            hero_columns = [row[1] for row in cursor.fetchall()]
+            if "short_name" not in hero_columns:
+                conn.execute("ALTER TABLE heroes ADD COLUMN short_name TEXT")
+                conn.execute("DELETE FROM heroes")
 
             conn.executescript("""
                 CREATE INDEX IF NOT EXISTS idx_rampage_parsed ON rampage_matches(parsed);
@@ -48,6 +195,23 @@ class Database:
                     match_id INTEGER PRIMARY KEY,
                     opendota_data TEXT NOT NULL,
                     parsed_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS export_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    match_id INTEGER NOT NULL,
+                    exported_at TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    UNIQUE(match_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_export_match ON export_log(match_id);
+
+                CREATE TABLE IF NOT EXISTS chat_wheels (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    all_chat INTEGER DEFAULT 0,
+                    synced_at TEXT NOT NULL
                 );
             """)
 
