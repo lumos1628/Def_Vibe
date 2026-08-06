@@ -32,28 +32,6 @@ class MatchRepository:
             )
             return cursor.fetchone() is not None
 
-    def count_by_hero(self, hero_id: int) -> int:
-        with self.db.get_connection() as conn:
-            cursor = conn.execute(
-                "SELECT COUNT(*) FROM rampage_matches WHERE hero_id = ?",
-                (hero_id,),
-            )
-            return cursor.fetchone()[0]
-
-    def list_all(self) -> list[dict]:
-        with self.db.get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                """
-                SELECT rm.match_id, rm.hero_id, h.display_name AS hero_name,
-                       rm.played_at, rm.steam_account_id, rm.extracted_at
-                FROM rampage_matches rm
-                JOIN heroes h ON h.id = rm.hero_id
-                ORDER BY rm.played_at DESC;
-                """
-            )
-            return [dict(row) for row in cursor.fetchall()]
-
     def count(self) -> int:
         with self.db.get_connection() as conn:
             cursor = conn.execute("SELECT COUNT(*) FROM rampage_matches")
@@ -249,14 +227,6 @@ class MatchRepository:
                 (match_id,),
             )
             return [row[0] for row in cursor.fetchall()]
-
-    def list_all_match_details(self) -> list[tuple[int, dict]]:
-        with self.db.get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT match_id, opendota_data FROM match_details ORDER BY match_id"
-            )
-            return [(row["match_id"], json.loads(row["opendota_data"])) for row in cursor.fetchall()]
 
     def list_matches_to_export(self, today_iso: str) -> list[tuple[int, dict, bool, bool]]:
         with self.db.get_connection() as conn:

@@ -54,10 +54,4 @@ class ChatWheelRepository:
             cursor = conn.execute("SELECT COUNT(*) FROM chat_wheels")
             return cursor.fetchone()[0]
 
-    def list_all(self) -> list[dict]:
-        with self.db.get_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                "SELECT id, name, label, message, all_chat FROM chat_wheels ORDER BY id"
-            )
-            return [dict(row) for row in cursor.fetchall()]
+

@@ -1,9 +1,12 @@
 from datetime import datetime, timezone
+
 from api.client import StratzClient
 from api.queries import LATEST_RAMPAGES_QUERY, MATCH_DATE_QUERY, RAMPAGES_QUERY
 from config import Config
+from core.time import parse_timestamp
 from repositories.hero_repository import HeroRepository
 from repositories.match_repository import MatchRepository
+
 
 class RampageService:
     def __init__(
@@ -105,12 +108,4 @@ class RampageService:
         if not start_dt:
             return datetime.now(timezone.utc).isoformat()
 
-        return self._parse_timestamp(start_dt)
-
-    @staticmethod
-    def _parse_timestamp(value) -> str:
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
-        return datetime.now(timezone.utc).isoformat()
+        return parse_timestamp(start_dt)

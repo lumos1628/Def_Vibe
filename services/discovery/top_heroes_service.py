@@ -1,27 +1,14 @@
-from datetime import datetime, timezone
-from typing import Any
-
 from api.client import StratzClient
-from api.queries import (
-    HERO_STATS_WIN_WEEK_QUERY,
-    LEADERBOARD_HERO_QUERY,
-    PLAYER_MATCHES_QUERY,
-)
+from api.queries import HERO_STATS_WIN_WEEK_QUERY
 from config import Config
+from core.time import parse_timestamp
 from repositories.hero_repository import HeroRepository
 from repositories.match_repository import MatchRepository
 
+from .base import BaseDiscoveryService
 
-class TopHeroesService:
-    def __init__(
-        self,
-        client: StratzClient,
-        hero_repository: HeroRepository,
-        match_repository: MatchRepository,
-    ) -> None:
-        self.client = client
-        self.hero_repository = hero_repository
-        self.match_repository = match_repository
+
+class TopHeroesService(BaseDiscoveryService):
 
     def fetch_top_heroes_matches(self) -> int:
         heroes = {hero["id"]: hero for hero in self.hero_repository.list_all()}
@@ -36,7 +23,9 @@ class TopHeroesService:
             print(f"\n[{hero_id}] {hero_name}: buscando top players...")
 
             try:
-                top_players = self._fetch_top_players(hero_id)
+                top_players = self._fetch_top_players(
+                    hero_id, Config.TOP_PLAYERS_PER_HERO
+                )
                 if not top_players:
                     print("  → Sin top players.")
                     continue
@@ -45,7 +34,9 @@ class TopHeroesService:
                 for player_id in top_players:
                     print(f"    Player {player_id}: buscando últimas partidas...")
                     try:
-                        matches = self._fetch_player_matches(player_id, hero_id)
+                        matches = self._fetch_player_matches(
+                            player_id, hero_id, Config.TOP_MATCHES_PER_PLAYER
+                        )
                         if not matches:
                             print("      → Sin partidas.")
                             continue
@@ -53,9 +44,7 @@ class TopHeroesService:
                         saved_for_player = 0
                         for match in matches:
                             match_id = match["id"]
-                            played_at = self._parse_timestamp(
-                                match.get("startDateTime")
-                            )
+                            played_at = parse_timestamp(match.get("startDateTime"))
 
                             if self.match_repository.exists_for_hero(
                                 match_id, hero_id
@@ -114,37 +103,3 @@ class TopHeroesService:
         print(f"Top {len(top_heroes)} héroes seleccionados.")
         return top_heroes
 
-    def _fetch_top_players(self, hero_id: int) -> list[int]:
-        result = self.client.execute(
-            LEADERBOARD_HERO_QUERY,
-            {
-                "heroIds": [hero_id],
-                "bracketIds": [Config.LEADERBOARD_BRACKET],
-                "take": Config.TOP_PLAYERS_PER_HERO,
-            },
-        )
-        leaderboard = result.get("leaderboard", {}).get("hero") or []
-        return [
-            entry["steamAccountId"]
-            for entry in leaderboard
-            if entry.get("steamAccountId")
-        ]
-
-    def _fetch_player_matches(self, player_id: int, hero_id: int) -> list[dict[str, Any]]:
-        result = self.client.execute(
-            PLAYER_MATCHES_QUERY,
-            {
-                "steamAccountId": player_id,
-                "heroIds": [hero_id],
-                "take": Config.TOP_MATCHES_PER_PLAYER,
-            },
-        )
-        return result.get("player", {}).get("matches") or []
-
-    @staticmethod
-    def _parse_timestamp(value: Any) -> str:
-        if isinstance(value, str):
-            return value
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
-        return datetime.now(timezone.utc).isoformat()
