@@ -19,6 +19,10 @@ This module does not define functions or classes. It exports string constants.
 | `HERO_STATS_WIN_WEEK_QUERY` | `bracketIds` | Fetches weekly win/played stats per hero. |
 | `LEADERBOARD_HERO_QUERY` | `heroIds`, `bracketIds`, `take` | Fetches top players for a hero. |
 | `PLAYER_MATCHES_QUERY` | `steamAccountId`, `heroIds`, `take` | Fetches recent matches of a player on a specific hero. |
+| `RECENT_RAMPAGES_QUERY` | `heroId`, `take` | Fetches recent rampages with the nested `match.startDateTime` inlined (max `take` is 20). |
+| `PRO_PLAYERS_QUERY` | None | Fetches all pro player accounts (`id`, `name`). |
+| `PRO_RECENT_MATCHES_QUERY` | `steamAccountIds`, `startDateTime`, `take` | Fetches recent matches for up to 5 players per call, including `players { steamAccountId heroId }` to resolve the played hero. |
+| `PLAYERS_HERO_MATCHES_QUERY` | `steamAccountIds`, `startDateTime`, `heroIds`, `take` | Fetches recent matches for up to 5 players per call filtered by hero. |
 
 ## Internal flow
 

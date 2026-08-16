@@ -41,7 +41,7 @@ Polls the status of a parse job.
 
 #### `pause() -> None`
 
-Sleeps for `Config.OPENDOTA_REQUEST_DELAY` (1.0 second by default). Called automatically after every request.
+Sleeps for `Config.OPENDOTA_REQUEST_DELAY` (0.65s by default). Called automatically after every request.
 
 ### `class RateLimitError(Exception)`
 

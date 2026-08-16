@@ -5,7 +5,7 @@
 When the application starts (`main.main()`), it performs the following steps:
 
 1. `Config.validate()` — ensures `STRATZ_API_KEY` is set.
-2. `ServiceFactory` — creates database, clients, and repositories.
+2. `ServiceFactory` — creates database, clients, and repositories (including `DriveService`).
 3. `factory.db.init()` — creates SQLite tables if they do not exist.
 4. `factory.db.migrate()` — adds missing columns and tables to existing databases.
 5. `factory.hero_service().ensure_synced()` — downloads the hero list once.
@@ -18,31 +18,32 @@ When the application starts (`main.main()`), it performs the following steps:
 1. Buscar y almacenar IDs
 2. Parse
 3. Exportar data
-4. Salir
+4. Analizar data
+5. Salir
 ```
 
-## Phase 1: Search and store IDs
+## Phase 1: Search and store IDs (daily harvest)
 
 This phase discovers match IDs and stores them in `rampage_matches`.
 
 ### Submenu
 
 ```
-1. Buscar top 60 héroes + jugadores + partidas
-2. Buscar por rampage divine_inmortal
-3. Buscar últimos 5 rampages por héroe
-4. Buscar específica top
-5. Volver al menú principal
+1. Cosecha diaria
+2. Volver al menú principal
 ```
 
-### Workflows
+`TopHeroesService`, `RampageService`, and `SpecificTopService` are legacy discovery services: they still exist and are wired in `ServiceFactory`, but no menu option reaches them anymore.
 
-| Option | Service | What it does |
-|--------|---------|--------------|
-| 1 | `TopHeroesService` | Fetches the top 60 most-played heroes, then for each hero fetches the top 3 players and their 3 most recent matches. |
-| 2 | `RampageService` | Fetches `RAMPAGE_TAKE` rampage matches per hero in the `DIVINE_IMMORTAL` bracket. |
-| 3 | `RampageService` | Fetches the latest 5 rampage matches per hero, regardless of bracket. |
-| 4 | `SpecificTopService` | Fetches top players for a configured list of heroes (e.g., Rubick, Invoker, Morphling) with configurable counts. |
+### Workflow for `Cosecha diaria`
+
+`DailyHarvestService.harvest()` collects up to `Config.DAILY_MATCH_TARGET` (2900) new distinct `match_id` values, all at most `Config.DAILY_MATCH_MAX_AGE_DAYS` (7) days old, deduplicated globally against every ID already stored. The phases run in priority order and each one stops as soon as the target is reached:
+
+1. **Phase 1 — recent rampages**: `RECENT_RAMPAGES_QUERY` per hero, all brackets, `take=20` (Stratz max). The response inlines `match.startDateTime`, so no extra date queries are needed; entries older than the cutoff are skipped client-side.
+2. **Phase 2 — pro players**: `PRO_PLAYERS_QUERY` (pro accounts), then their recent matches in batches of at most `Config.PLAYERS_BATCH_SIZE` (5, Stratz max) accounts per request.
+3. **Phase 3 — leaderboard of unique-mechanics heroes**: top leaderboard players of `Config.SPECIFIC_TOP_HEROES` and their recent matches on those heroes.
+4. **Phase 4 — most-played heroes**: ranking from `HERO_STATS_WIN_WEEK_QUERY` (`winWeek`).
+5. **Phase 5 — highest-winrate heroes**: same query, filtered by `Config.WINRATE_MIN_MATCHES` weekly matches to reduce noise.
 
 ### Data stored
 
@@ -52,6 +53,13 @@ This phase discovers match IDs and stores them in `rampage_matches`.
 - `steam_account_id`
 - `extracted_at` (when the row was inserted)
 
+### After the harvest
+
+The CLI automatically calls `ExportService.export_match_ids_csv()` with the IDs saved in the run:
+
+1. Writes `exports/match_ids_YYYY-MM-DD.csv` (one `match_id` per row).
+2. Uploads it to Google Drive (when configured) so the Tecsup machine can pick it up.
+
 ## Phase 2: Parse
 
 This phase uses the OpenDota API to replay-parse matches.
@@ -60,29 +68,22 @@ This phase uses the OpenDota API to replay-parse matches.
 
 ```
 1. Parsear
-2. Limpiar IDs antiguas
-3. Salir
+2. Encolar parses desde CSV (Tecsup)
+3. Descargar parses desde CSV (casa)
+4. Limpiar IDs antiguas
+5. Volver al menú principal
 ```
 
 ### Workflow for `Parsear`
 
-1. **Load batch**
-   - Reads up to `Config.PARSE_BATCH_SIZE` matches with `parse_status` in `pending`, `queued`, or `parsing`.
+With `Config.PARSE_GET_ONLY` enabled (default), parsing only issues GETs — no parse jobs are enqueued and nothing is polled:
 
-2. **Verify / enqueue**
-   - For each match, calls `GET /matches/{match_id}`.
-   - Saves JSON to `match_details`.
-   - If the match already has `chat` or `kills_log`, marks it as `done`.
-   - If the match is older than `MAX_REPLAY_AGE_DAYS`, marks it as `unparseable`.
-   - Otherwise, requests a replay parse via `POST /request/{match_id}` and stores the `jobId`.
+1. **Load batch** — reads up to `Config.PARSE_BATCH_SIZE` matches with `parse_status` in `pending`, `queued`, or `parsing`.
+2. **Verify** — for each match, calls `GET /matches/{match_id}`.
+   - If the match already has `chat` or `kills_log`, saves the JSON to `data/replays/{match_date}/{match_id}.json`, registers it in the `match_details` index, and marks it `done`.
+   - Otherwise, leaves it `pending` to be retried on a later run.
 
-3. **Poll jobs**
-   - For each queued job, waits `PARSE_POLL_INTERVAL` seconds.
-   - Calls `GET /request/{jobId}` up to `PARSE_MAX_POLLS` times.
-   - When the job is completed, fetches the match again and saves it.
-
-4. **Retry direct fetch**
-   - If jobs are still queued after polling, attempts to fetch the match data directly.
+When `PARSE_GET_ONLY` is disabled, the legacy flow runs instead: matches are marked `data_verified`, parses are requested via `POST /request/{match_id}`, the returned `jobId`s are polled (`PARSE_POLL_INTERVAL`, up to `PARSE_MAX_POLLS`), and completed jobs are fetched and saved. Matches older than `MAX_REPLAY_AGE_DAYS` are marked `unparseable`.
 
 ### Parse states
 
@@ -93,7 +94,27 @@ pending → queued → parsing → done
 
 ### `Limpiar IDs antiguas`
 
-- Deletes matches (and their details/export logs) older than `CLEAN_OLD_MATCHES_DAYS` (default 7 days).
+- Deletes matches (and their index rows, export logs, and replay files) older than `CLEAN_OLD_MATCHES_DAYS` (default 7 days). Filtering uses the `match_date` index — no JSON scanning.
+
+### Workflow for `Encolar parses desde CSV (Tecsup)`
+
+Intended to run at the institute on a machine with its own OpenDota quota/IP. No local database is touched.
+
+1. Pick a `exports/match_ids_*.csv`. When no local CSV exists, the menu offers to download the most recent one from Google Drive.
+2. For each ID, call `POST /request/{match_id}` with progress `[i/N]` and the usual 429 pause.
+3. IDs that return no job (already parsed or no replay) are counted separately, not treated as errors.
+4. Writes `exports/parse_jobs_YYYY-MM-DD.csv` with the `(match_id, job_id)` pairs for traceability. This file stays local.
+
+### Workflow for `Descargar parses desde CSV (casa)`
+
+Intended to run at home once the parses were enqueued at the institute. Saves OpenDota quota by skipping work already done.
+
+1. Pick a `exports/match_ids_*.csv`.
+2. `MatchRepository.list_downloadable()` filters out IDs already `done` with replay data and `unparseable` ones (they are reported as skipped).
+3. For each remaining ID, call `GET /matches/{match_id}`.
+4. If the match has replay data, save the JSON file under `data/replays/{match_date}/`, update the `match_details` index, and mark `parse_status = 'done'`.
+5. If the parse is not ready yet (OpenDota queues can take hours), the match is left `pending` to be retried on a later run.
+6. Once every ID in the CSV is `done` or `unparseable`, the CLI asks whether to delete the CSV locally and on Drive (`cleanup_consumed_csv()`).
 
 ## Phase 3: Export data
 
@@ -124,9 +145,30 @@ This phase reads parsed match data and generates reports.
 - Clears today's export log entries for matches parsed today.
 - Re-runs the export process.
 
+## Phase 4: Analyze data
+
+`AnalysisService.export_top()` (main menu option `4`) builds a combined rampage ranking from the parsed replay files — no API calls.
+
+1. Pick a played date or all dates.
+2. Reads only matches with `parse_status = 'done'` and `has_replay_data = 1`.
+3. For each match, detects the **shortest** 5-kill window (≤18s) among the match's heroes (`racha_seg`).
+4. Counts reactions: chat messages within `Config.ANALYSIS_REACTION_WINDOW_SECONDS` (60s) after the rampage ends.
+5. Scores rank-based within the selection (best speed = N points, most reactions = N points).
+6. Writes `exports/rampages/rampages_YYYY-MM-DD.csv` (or `rampages_all.csv` for all dates).
+
 ## Rate limiting and resilience
 
 - Stratz requests are spaced by `REQUEST_DELAY` (0.5s) and retried up to `MAX_RETRIES` times.
-- OpenDota requests are spaced by `OPENDOTA_REQUEST_DELAY` (1s).
+- OpenDota requests are spaced by `OPENDOTA_REQUEST_DELAY` (0.65s).
 - OpenDota 429 responses are handled with `Retry-After` or exponential backoff.
-- After `RATE_LIMIT_MAX_RETRIES` consecutive 429s, parsing pauses for 5 minutes and resumes.
+- After `RATE_LIMIT_MAX_RETRIES` consecutive 429s, parsing pauses for `RATE_LIMIT_PAUSE_SECONDS` (300s = 5 minutes) and resumes from the same item.
+
+## Google Drive flow (match IDs CSV)
+
+The only file that crosses machines through Drive is `exports/match_ids_*.csv`:
+
+- **Home** runs the harvest → the CSV is uploaded to the shared folder.
+- **Tecsup** (own OpenDota quota/IP) downloads the CSV from Drive, enqueues parses, and keeps `parse_jobs_*.csv` local.
+- **Home** downloads the parsed matches; once all IDs in the CSV are `done` or `unparseable`, the CSV is deleted locally and from Drive.
+
+Excel/chat/kill exports, the rampage ranking, the replay JSONs, and `parse_jobs_*.csv` stay **local only**.

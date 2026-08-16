@@ -1,5 +1,7 @@
 # Refactor Plan
 
+> **Status: COMPLETED.** The refactor described in this plan was executed. `main.py` is now a minimal entry point; `ServiceFactory` lives in `cli/factory.py`, menus in `cli/menus.py`, shared helpers in `core/`, discovery services in `services/discovery/` (including the newer `DailyHarvestService`), replay JSON storage in `core/replay_store.py`, and the `tests/` scaffolding exists (empty, prepared for pytest). Later additions not covered here: `services/analysis_service.py`, `services/drive_service.py`, and the Google Drive flow. This file is kept for historical reference.
+
 ## 1. Diagnosis of the current architecture
 
 The current architecture already follows a correct layered pattern:
@@ -251,4 +253,4 @@ After moving files, existing docs in `docs/modules/` reference old paths.
 
 ## Note
 
-The refactor actions described in this plan have **not** been applied. They are documented here for future execution.
+The refactor actions described in this plan **have been applied** (see the status banner at the top). This document is kept for historical reference.

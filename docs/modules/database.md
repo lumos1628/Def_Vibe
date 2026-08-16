@@ -35,8 +35,9 @@ Indexes created:
 
 Upgrades existing databases by:
 
+- Migrating legacy `match_details` rows from inline JSON blobs to per-match files under `data/replays/` (dropping the `opendota_data` column).
 - Adding missing columns to `rampage_matches`.
-- Creating the `match_details` table.
+- Creating the `match_details` table (index + file pointer).
 - Adding missing indexes.
 - Backfilling `has_replay_data`, `parse_status`, and `data_verified`.
 - Resetting `unparseable` for recent matches so they can be retried.
@@ -53,6 +54,7 @@ Returns the number of heroes. Used by `HeroRepository`.
 ## Dependencies
 
 - `config.Config`
+- `core.replay_store.ReplayStore`
 - Standard library: `datetime`, `json`, `sqlite3`, `pathlib`
 
 ## Inputs

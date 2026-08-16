@@ -14,6 +14,25 @@ Each directory contains:
 - `kills.csv`
 - `rampage_export_YYYY-MM-DD.xlsx`
 
+## `match_ids_YYYY-MM-DD.csv`
+
+Written after every daily harvest and uploaded to Google Drive (when configured). Meant to be shared so the IDs can be parsed by a third party (e.g., another OpenDota API key / IP).
+
+| Column | Description |
+|--------|-------------|
+| `match_id` | Dota 2 match ID |
+
+One `match_id` per row; the order is the sorted list of IDs saved during the harvest run.
+
+## `parse_jobs_YYYY-MM-DD.csv`
+
+Written by `parse_service.enqueue_from_csv()` (menu `2` → option `2`, run at the institute). Traceability of the enqueued OpenDota parse jobs. Stays **local only** — it is never uploaded to Drive.
+
+| Column | Description |
+|--------|-------------|
+| `match_id` | Dota 2 match ID |
+| `job_id` | OpenDota parse job ID returned by `POST /request/{match_id}` |
+
 ## `chats.csv`
 
 | Column | Description |
@@ -70,6 +89,37 @@ Each directory contains:
 A rampage is detected when a player has **5 consecutive kills** within **18 seconds** in the `kills_log` of the hero associated with the match.
 
 The `is_rampage_kill` flag is set to `1` for all 5 kills that form the first such window.
+
+## Rampage analysis ranking
+
+Written by the analysis submenu (main menu option `4`) to `exports/rampages/`:
+
+- `rampages_YYYY-MM-DD.csv` — one ranking per selected played date.
+- `rampages_all.csv` — ranking across all dates.
+
+**File:** `rampages_<selection>.csv`
+
+| Column | Description |
+|--------|-------------|
+| `rank` | Position in the combined ranking |
+| `match_id` | Dota 2 match ID |
+| `fecha_partida` | Match start date (`played_at`) |
+| `hero_id` | Hero that achieved the rampage |
+| `hero_name` | Display name of that hero |
+| `rampage_time` | In-game start of the rampage window (seconds) |
+| `rampage_time_min` | Rampage start in minutes |
+| `racha_seg` | Duration of the shortest 5-kill window (≤18s) |
+| `n_reacciones` | Chat messages within `Config.ANALYSIS_REACTION_WINDOW_SECONDS` (60s) after the rampage ends |
+| `puntaje_racha` | Rank-based points for speed (shortest racha = N) |
+| `puntaje_reacciones` | Rank-based points for reactions (most reactions = N) |
+| `puntaje_total` | `puntaje_racha + puntaje_reacciones` |
+| `chats_reaccion` | Reaction chats joined as `[mm:ss] Héroe: mensaje`, separated by `\|` |
+
+**Notes**
+- Only matches with `parse_status = 'done'` and `has_replay_data = 1` are considered.
+- Matches without a detectable rampage are excluded from the ranking.
+- Reactions are measured from the moment the rampage completes (the 5th kill).
+- The top `Config.ANALYSIS_TOP_N` rows are also printed to the console.
 
 ## Chat wheel resolution
 

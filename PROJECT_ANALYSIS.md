@@ -4,10 +4,11 @@
 
 **Stratz Rampage Scraper** es una CLI en Python 3.12 que recolecta partidas de Dota 2 con rampages desde la API GraphQL de Stratz, las parsea a través de la API REST de OpenDota y exporta los datos de chats y kills en archivos CSV y Excel.
 
-- **Propósito:** Buscar partidas donde un héroe realiza rampages, parsear sus repeticiones y exportar kills/chats.
+- **Propósito:** Descubrir partidas donde un héroe realiza rampages, parsear sus repeticiones, exportar kills/chats y construir un ranking combinado de rampages.
 - **Arquitectura:** Patrón por capas: `api` → `services` → `repositories` → `database`.
-- **Persistencia:** SQLite local (`data.db`).
-- **Entrada:** Menú interactivo en consola (`main.py`).
+- **Persistencia:** SQLite local (`data.db`) + JSON crudo por partida en `data/replays/`.
+- **Integraciones externas:** Stratz (GraphQL), OpenDota (REST) y Google Drive (solo el CSV de IDs).
+- **Entrada:** Menú interactivo en consola (`main.py` → `cli/menus.py`).
 
 ---
 
@@ -16,32 +17,41 @@
 ```
 /home/gabriel/Escritorio/Repos/Def/
 ├── .env                  # Variables de entorno (ignorado por .gitignore)
-├── .env.example          # Plantilla con STRATZ_API_KEY
-├── .gitignore            # Ignora .env, data.db, exports/, __pycache__/
+├── .env.example          # Plantilla con STRATZ_API_KEY y GOOGLE_*
+├── .gitignore            # Ignora .env, data.db, exports/, __pycache__/, credenciales Drive
 ├── AGENTS.md             # Documentación para agentes
+├── README.md             # Documentación de alto nivel
 ├── config.py             # Configuración centralizada
-├── data/
-│   └── chat_wheel.json   # Catálogo local de chat wheels
-├── data.db               # Base de datos SQLite (ignorada)
 ├── database.py           # Wrapper de SQLite + migraciones
-├── main.py               # Punto de entrada y menús
+├── main.py               # Único punto de entrada
 ├── requirements.txt      # Dependencias Python
+├── data/
+│   ├── chat_wheel.json             # Catálogo local de chat wheels
+│   ├── drive_client_secret.json    # Client secret OAuth de Drive (ignorado)
+│   ├── drive_token.json            # Token OAuth de Drive (ignorado)
+│   └── replays/{match_date}/{match_id}.json
+├── data.db               # Base de datos SQLite (ignorada)
+├── exports/              # Exportaciones CSV/Excel y match_ids_*.csv (ignorada)
 ├── api/
-│   ├── __init__.py
 │   ├── client.py         # Cliente GraphQL de Stratz
 │   ├── opendota_client.py# Cliente REST de OpenDota
 │   └── queries.py        # Cadenas GraphQL
+├── cli/
+│   ├── factory.py        # ServiceFactory (inyección de dependencias)
+│   └── menus.py          # Menús interactivos
+├── core/
+│   ├── models.py         # Dataclasses de dominio
+│   ├── replay_store.py   # Archivos JSON de replay por partida
+│   └── time.py           # Helpers de tiempo
 ├── services/
-│   ├── __init__.py
+│   ├── analysis_service.py
 │   ├── chat_wheel_service.py
+│   ├── discovery/        # daily_harvest_service.py, base.py + servicios legacy
+│   ├── drive_service.py
 │   ├── export_service.py
 │   ├── hero_service.py
-│   ├── parse_service.py
-│   ├── rampage_service.py
-│   ├── specific_top_service.py
-│   └── top_heroes_service.py
+│   └── parse_service.py
 └── repositories/
-    ├── __init__.py
     ├── chat_wheel_repository.py
     ├── hero_repository.py
     └── match_repository.py
@@ -76,33 +86,42 @@
 1. Buscar y almacenar IDs
 2. Parse
 3. Exportar data
-4. Salir
+4. Analizar data
+5. Salir
 ```
 
 #### Submenú: Buscar y almacenar IDs
 
 ```
-1. Buscar top 60 héroes + jugadores + partidas     → TopHeroesService.fetch_top_heroes_matches()
-2. Buscar por rampage divine_inmortal              → RampageService.fetch_by_rampages()
-3. Buscar últimos 5 rampages por héroe             → RampageService.fetch_latest_rampages()
-4. Buscar específica top                           → SpecificTopService.fetch_specific_top_matches()
-5. Volver al menú principal
+1. Cosecha diaria     → DailyHarvestService.harvest() + export match_ids CSV (y subida a Drive)
+2. Volver al menú principal
 ```
+
+`RampageService`, `TopHeroesService` y `SpecificTopService` son servicios de discovery **legacy**: siguen existiendo y cableados en `ServiceFactory`, pero ningún menú los alcanza.
 
 #### Submenú: Parse
 
 ```
-1. Parsear           → ParseService.parse_unparsed()
-2. Limpiar IDs antiguas → ParseService.clean_old_matches()
-3. Salir
+1. Parsear                     → ParseService.parse_unparsed() (modo GET-only por defecto)
+2. Encolar parses desde CSV    → ParseService.enqueue_from_csv() (Tecsup)
+3. Descargar parses desde CSV  → ParseService.download_from_csv() (casa)
+4. Limpiar IDs antiguas        → ParseService.clean_old_matches()
+5. Volver al menú principal
 ```
 
 #### Submenú: Exportar data
 
 ```
-1. Exportar kills y chats                → ExportService.export_chat_kills_csv()
+1. Exportar kills y chats                → ExportService.export_chat_kills()
 2. Re-exportar partidas parseadas hoy    → ExportService.reexport_parsed_today()
 3. Volver al menú principal
+```
+
+#### Submenú: Analizar data
+
+```
+1. Fecha específica   → AnalysisService.export_top(date_prefix)
+2. Todas las fechas   → AnalysisService.export_top(None)
 ```
 
 ---
@@ -113,26 +132,37 @@ Clase `Config` centralizada con variables de entorno y constantes.
 
 | Variable | Significado |
 |----------|-------------|
-| `STRATZ_API_KEY` | Token Bearer para Stratz GraphQL |
+| `STRATZ_API_KEY` | Token Bearer para Stratz GraphQL (obligatorio) |
 | `OPENDOTA_API_KEY` | API key opcional para OpenDota |
+| `GOOGLE_DRIVE_CLIENT_SECRETS` | Path al client secret OAuth de Drive (opcional) |
+| `GOOGLE_DRIVE_TOKEN_PATH` | Dónde se guarda el token OAuth de Drive (opcional) |
+| `GOOGLE_DRIVE_FOLDER_ID` | ID de la carpeta compartida de Drive (opcional) |
 | `BASE_URL` | `https://api.stratz.com/graphql` |
 | `OPENDOTA_BASE_URL` | `https://api.opendota.com/api` |
 | `DB_PATH` | `data.db` |
+| `REPLAY_DATA_DIR` | `data/replays` |
 | `EXPORT_DIR` | `exports/` |
-| `BRACKET` | `DIVINE_IMMORTAL` |
+| `ANALYSIS_EXPORT_DIR` | `exports/rampages/` |
+| `BRACKET` | `DIVINE_IMMORTAL` (servicios legacy) |
 | `REQUEST_DELAY` | 0.5s entre llamadas Stratz |
-| `OPENDOTA_REQUEST_DELAY` | 1.0s entre llamadas OpenDota |
-| `RAMPAGE_TAKE` | 2 matches por héroe en búsqueda de rampages |
+| `OPENDOTA_REQUEST_DELAY` | 0.65s entre llamadas OpenDota |
+| `RAMPAGE_TAKE` | 2 matches por héroe (legacy) |
 | `MAX_REPLAY_AGE_DAYS` | 8 días máximo para parsear replay |
-| `CLEAN_OLD_MATCHES_DAYS` | 7 días para limpieza manual |
-| `PARSE_BATCH_SIZE` | 1000 partidas por lote |
-| `PARSE_POLL_INTERVAL` | 300s entre rondas de polling |
+| `CLEAN_OLD_MATCHES_DAYS` | 7 días para limpieza |
+| `PARSE_BATCH_SIZE` | 3000 partidas por lote |
+| `PARSE_POLL_INTERVAL` | 150s entre rondas de polling |
 | `PARSE_MAX_POLLS` | 4 rondas máximo |
-| `TOP_HEROES_COUNT` | 60 héroes top |
-| `TOP_PLAYERS_PER_HERO` | 3 jugadores top por héroe |
-| `TOP_MATCHES_PER_PLAYER` | 3 partidas por jugador |
-| `SPECIFIC_TOP_HEROES` | Diccionario `{hero_id: top_count}` para búsqueda específica |
-| `HERO_STATS_BRACKETS` | Todos los brackets de ranked |
+| `PARSE_GET_ONLY` | True (modo solo-GET: no encola jobs) |
+| `RATE_LIMIT_MAX_RETRIES` | 10 (429 consecutivos antes de pausar) |
+| `RATE_LIMIT_PAUSE_SECONDS` | 300s |
+| `ANALYSIS_TOP_N` | 10 (filas impresas en consola) |
+| `ANALYSIS_REACTION_WINDOW_SECONDS` | 60s (ventana de reacciones) |
+| `DAILY_MATCH_TARGET` | 2900 IDs nuevos por cosecha |
+| `DAILY_MATCH_MAX_AGE_DAYS` | 7 días |
+| `DAILY_RAMPAGE_TAKE` | 20 (máximo Stratz) |
+| `PLAYERS_BATCH_SIZE` | 5 (máximo Stratz) |
+| `TOP_HEROES_COUNT` | 60 (legacy) |
+| `SPECIFIC_TOP_HEROES` | Diccionario `{hero_id: top_count}` (legacy + fase 3 de cosecha) |
 
 ---
 
@@ -140,10 +170,14 @@ Clase `Config` centralizada con variables de entorno y constantes.
 
 | Paquete | Uso |
 |---------|-----|
-| `requests>=2.31.0` | HTTP para OpenDota |
-| `python-dotenv>=1.0.0` | Cargar variables de `.env` |
-| `cloudscraper>=1.2.71` | Bypass de Cloudflare para Stratz |
-| `openpyxl>=3.1.2` | Generar archivos Excel `.xlsx` |
+| `requests` | HTTP para OpenDota |
+| `python-dotenv` | Cargar variables de `.env` |
+| `cloudscraper` | Bypass de Cloudflare para Stratz |
+| `openpyxl` | Generar archivos Excel `.xlsx` |
+| `google-api-python-client` | API de Google Drive (opcional) |
+| `google-auth` | Autenticación de Google (opcional) |
+| `google-auth-httplib2` | Soporte HTTP para google-auth (opcional) |
+| `google-auth-oauthlib` | Flujo OAuth de usuario para Drive (opcional) |
 
 ---
 
@@ -161,9 +195,9 @@ Clase `Config` centralizada con variables de entorno y constantes.
 ### `api/opendota_client.py`
 
 - **`OpenDotaClient`**: cliente REST para OpenDota.
+  - Delay de 0.65s entre requests (`Config.OPENDOTA_REQUEST_DELAY`).
   - Manejo de rate limit 429: espera `Retry-After` o backoff exponencial.
   - Si se reciben `RATE_LIMIT_MAX_RETRIES` 429 consecutivos, lanza `RateLimitError`.
-  - `pause()`: espera `Config.OPENDOTA_REQUEST_DELAY` después de cada request.
   - Métodos principales:
     - `get_match(match_id)` → `GET /matches/{match_id}`
     - `request_parse(match_id)` → `POST /request/{match_id}`
@@ -171,81 +205,52 @@ Clase `Config` centralizada con variables de entorno y constantes.
 
 ### `api/queries.py`
 
-Contiene las queries GraphQL:
-
-| Query | Uso |
-|-------|-----|
-| `HEROES_QUERY` | Listar héroes (id, displayName, shortName) |
-| `RAMPAGES_QUERY` | Rampages por héroe + bracket |
-| `LATEST_RAMPAGES_QUERY` | Últimos rampages por héroe (sin bracket) |
-| `MATCH_DATE_QUERY` | Fecha de inicio de una partida |
-| `HERO_STATS_WIN_WEEK_QUERY` | Héroes más jugados por bracket |
-| `LEADERBOARD_HERO_QUERY` | Top jugadores de un héroe |
-| `PLAYER_MATCHES_QUERY` | Partidas recientes de un jugador |
+Contiene las queries GraphQL, incluyendo las de la cosecha diaria: `RECENT_RAMPAGES_QUERY`, `PRO_PLAYERS_QUERY`, `PRO_RECENT_MATCHES_QUERY`, `PLAYERS_HERO_MATCHES_QUERY` y `HERO_STATS_WIN_WEEK_QUERY`.
 
 ---
 
 ## 7. Capa de servicios
 
-### `services/hero_service.py`
+### `services/hero_service.py` y `services/chat_wheel_service.py`
 
-- **`HeroService`**
-  - `sync()`: descarga héroes desde Stratz y los guarda.
-  - `ensure_synced()`: solo sincroniza si la tabla está vacía.
+- Sincronizan catálogos (héroes y chat wheels) solo si la tabla está vacía (`ensure_synced()`).
 
-### `services/chat_wheel_service.py`
+### `services/discovery/` (búsqueda de partidas)
 
-- **`ChatWheelService`**
-  - `sync()`: carga `data/chat_wheel.json` y guarda en BD.
-  - `ensure_synced()`: solo sincroniza si la tabla está vacía.
-
-### `services/rampage_service.py`
-
-- **`RampageService`**
-  - Itera sobre todos los héroes sincronizados.
-  - Busca rampages en Stratz para cada héroe.
-  - Para cada match nuevo, hace una segunda llamada para obtener `startDateTime`.
-  - Guarda en `rampage_matches` con `UNIQUE(hero_id, match_id)`.
-  - Métodos:
-    - `fetch_by_rampages()` → bracket `DIVINE_IMMORTAL`, `take = RAMPAGE_TAKE`.
-    - `fetch_latest_rampages()` → sin bracket, `take = 5`.
-
-### `services/top_heroes_service.py`
-
-- **`TopHeroesService`**
-  - Obtiene los 60 héroes más jugados (`winWeek`).
-  - Para cada uno, obtiene top 3 jugadores (`leaderboard`).
-  - Para cada jugador, obtiene sus últimas 3 partidas con ese héroe.
-  - Guarda matches en `rampage_matches`.
-
-### `services/specific_top_service.py`
-
-- **`SpecificTopService`**
-  - Similar a `TopHeroesService` pero para un conjunto fijo de héroes definidos en `Config.SPECIFIC_TOP_HEROES`.
-  - Permite buscar top 50/25/10/5 jugadores por héroe específico.
+- **`DailyHarvestService`** — única vía de descubrimiento activa. Cosecha hasta `DAILY_MATCH_TARGET` IDs nuevos en fases priorizadas (rampages recientes de todos los héroes, partidas de pro players, leaderboards de héroes de mecánicas únicas, héroes más jugados y héroes con mayor winrate del parche). Deduplica globalmente por `match_id`.
+- **Legacy (sin menú):** `RampageService`, `TopHeroesService`, `SpecificTopService` — siguen en `ServiceFactory` pero no son alcanzables.
 
 ### `services/parse_service.py`
 
 - **`ParseService`**
-  - Procesa lotes de partidas no parseadas.
-  - Fases:
-    1. **_enqueue_unparsed**: verifica match con `GET /matches/{match_id}`, guarda JSON en `match_details`. Si no tiene replay data y no es muy antiguo, encola parseo.
-    2. **_poll_jobs**: consulta estado de jobs encolados periódicamente.
-    3. **_fetch_done_matches**: reintenta obtener datos de matches que aún estén encolados.
-  - Estados de parseo: `pending`, `queued`, `parsing`, `done`, `failed`.
-  - Maneja `RateLimitError` con pausa de 300s.
-  - `clean_old_matches(days)`: elimina partidas antiguas.
+  - Modo **GET-only** por defecto (`PARSE_GET_ONLY=True`): consulta `GET /matches/{id}`, guarda y marca `done` las que ya tienen datos de replay; deja `pending` las que no (se reintentarán). No encola jobs ni hace polling.
+  - Modo legacy: encola parses (`POST /request/{id}`), hace polling de `jobId`s y reintenta la descarga directa.
+  - Estados de parseo: `pending`, `queued`, `parsing`, `done`, `failed`/`unparseable`.
+  - Maneja `RateLimitError` con pausa de `RATE_LIMIT_PAUSE_SECONDS` (300s).
+  - `enqueue_from_csv()` (Tecsup): encola parses de un `match_ids_*.csv` y escribe `parse_jobs_YYYY-MM-DD.csv`.
+  - `download_from_csv()` (casa): descarga los matches parseados de un CSV, filtrando por `list_downloadable()`.
+  - `download_latest_match_ids_from_drive()`, `count_pending_for_csv()`, `cleanup_consumed_csv()`: integración con Drive.
+  - `clean_old_matches(days)`: elimina partidas antiguas (filtrando por índice de `match_date`).
 
 ### `services/export_service.py`
 
 - **`ExportService`**
-  - Lee `match_details` del día actual.
+  - Lee los JSON de `data/replays/` del día actual.
   - Detecta rampage: ventana de 5 kills consecutivas en ≤18 segundos en el `kills_log` del héroe.
   - Traduce chat wheels usando la tabla `chat_wheels`.
   - Genera tres archivos por día en `exports/YYYY-MM-DD/`:
     - `chats.csv`
     - `kills.csv`
-    - `rampage_export_YYYY-MM-DD.xlsx` (con estilos dark-mode y filas coloreadas por match).
+    - `rampage_export_YYYY-MM-DD.xlsx` (con encabezado gris y filas alternadas verdes por match).
+  - `export_match_ids_csv()` escribe `match_ids_YYYY-MM-DD.csv` y lo sube a Drive (cuando está configurado).
+
+### `services/analysis_service.py`
+
+- **`AnalysisService`** — construye el ranking combinado de rampages (menú 4) a partir de los archivos de replay, sin llamadas API. Puntaje rank-based por velocidad (`racha_seg`) y reacciones en chat (`n_reacciones`). Exporta `exports/rampages/rampages_YYYY-MM-DD.csv` o `rampages_all.csv`.
+
+### `services/drive_service.py`
+
+- **`DriveService`** — única integración con Google Drive. Autentica como el usuario vía flujo OAuth de app de escritorio (client secret + token local). Comparte únicamente el `match_ids_*.csv` entre la máquina de casa y la de Tecsup. Degrada con gracia si no está configurado.
 
 ---
 
@@ -253,31 +258,20 @@ Contiene las queries GraphQL:
 
 ### `repositories/hero_repository.py`
 
-- **`HeroRepository`**
-  - `upsert(heroes)`: inserta/actualiza héroes.
-  - `list_all()`: devuelve todos los héroes.
-  - `count()`: delega a `Database.count_heroes()`.
+- `upsert(heroes)`, `list_all()`, `count()`.
 
 ### `repositories/chat_wheel_repository.py`
 
-- **`ChatWheelRepository`**
-  - `upsert(entries)`: inserta/actualiza chat wheels.
-  - `get_by_id(chat_wheel_id)`: busca un chat wheel por ID.
-  - `count()`, `list_all()`.
+- `upsert(entries)`, `get_by_id(chat_wheel_id)`, `count()`, `list_all()`.
 
 ### `repositories/match_repository.py`
 
-- **`MatchRepository`**
-  - `upsert(match_id, hero_id, played_at, steam_account_id)`: guarda match.
-  - `exists_for_hero(...)`: evita duplicados por héroe/match.
-  - `list_unparsed(limit)`: matches pendientes de parseo.
-  - `list_queued()`: matches con `job_id` en estado `queued`/`parsing`.
-  - `mark_parse_requested(...)`: actualiza estado a `queued`.
-  - `mark_parsed(...)`: marca como `done`/`failed`.
-  - `save_match_details(...)`: guarda JSON de OpenDota y actualiza flags.
-  - `list_matches_to_export(today_iso)`: matches parseados hoy no exportados.
-  - `mark_exported(...)`: registra exportación en `export_log`.
-  - `delete_old_matches(days)`: limpia partidas antiguas.
+- CRUD de `rampage_matches`, incluyendo `upsert()`, `exists_for_hero()`, `count_distinct()`, `list_all_match_ids()`.
+- Flujo de parseo: `list_unparsed()`, `count_pending_status()`, `get_parse_state()`, `list_queued()`, transiciones de estado (`mark_data_verified`, `update_parse_status`, `mark_parse_requested`, `mark_parsed`).
+- Almacenamiento de JSON: `save_match_details()` / `get_match_details()` delegan en `core/replay_store.ReplayStore`; la tabla `match_details` es solo un índice (`file_path`, `match_date`).
+- Análisis: `list_dates_with_parsed()`, `list_parsed_rows_by_date()`.
+- Exportación: `list_matches_to_export()`, `mark_exported()`, `clear_export_log_for_date()`, `clear_export_log_for_parsed_today()`.
+- Limpieza: `delete_old_matches(days)`.
 
 ---
 
@@ -296,178 +290,52 @@ Clase `Database` que envuelve SQLite.
 
 ### Tablas/columnas añadidas por `migrate()`
 
-- Columnas en `rampage_matches`:
-  - `parsed`, `has_replay_data`, `data_verified`
-  - `parse_requested_at`, `parse_request_count`, `parse_job_id`
-  - `parse_status`, `last_parse_attempt_at`, `unparseable`
-- Tabla `match_details` (JSON de OpenDota por match).
-- Índices adicionales.
-- Backfills para compatibilidad con DBs antiguas.
-
-### Esquema detallado
-
-**heroes**
-- `id INTEGER PRIMARY KEY`
-- `display_name TEXT NOT NULL`
-- `short_name TEXT NOT NULL`
-- `synced_at TEXT NOT NULL`
-
-**rampage_matches**
-- `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `match_id INTEGER NOT NULL`
-- `hero_id INTEGER NOT NULL`
-- `played_at TEXT NOT NULL`
-- `steam_account_id INTEGER NOT NULL`
-- `extracted_at TEXT NOT NULL`
-- `parsed INTEGER DEFAULT 0`
-- `has_replay_data INTEGER DEFAULT 0`
-- `data_verified INTEGER DEFAULT 0`
-- `parse_requested_at TEXT`
-- `parse_request_count INTEGER DEFAULT 0`
-- `parse_job_id TEXT`
-- `parse_status TEXT DEFAULT 'pending'`
-- `last_parse_attempt_at TEXT`
-- `unparseable INTEGER DEFAULT 0`
-- `UNIQUE(hero_id, match_id)`
-
-**match_details**
-- `match_id INTEGER PRIMARY KEY`
-- `opendota_data TEXT NOT NULL`
-- `parsed_at TEXT NOT NULL`
-
-**export_log**
-- `id INTEGER PRIMARY KEY AUTOINCREMENT`
-- `match_id INTEGER NOT NULL`
-- `exported_at TEXT NOT NULL`
-- `output_path TEXT NOT NULL`
-- `UNIQUE(match_id)`
-
-**chat_wheels**
-- `id INTEGER PRIMARY KEY`
-- `name TEXT NOT NULL`
-- `label TEXT NOT NULL`
-- `message TEXT NOT NULL`
-- `all_chat INTEGER DEFAULT 0`
-- `synced_at TEXT NOT NULL`
+- Columnas en `rampage_matches`: `parsed`, `has_replay_data`, `data_verified`, `parse_requested_at`, `parse_request_count`, `parse_job_id`, `parse_status`, `last_parse_attempt_at`, `unparseable`.
+- Tabla `match_details` — **solo índice** de los JSON guardados en `data/replays/{match_date}/{match_id}.json` (columnas `match_id`, `file_path`, `match_date`).
+- Conversión de DBs legacy: el JSON que estaba en línea en la columna `opendota_data` se vuelca a archivos y la columna se elimina.
 
 ---
 
 ## 10. Formatos de exportación CSV
 
-### `chats.csv`
-
-Campos (`CHAT_FIELDNAMES`):
-
-| Campo | Descripción |
-|-------|-------------|
-| `match_id` | ID de la partida |
-| `chat_time` | Tiempo del mensaje en segundos |
-| `chat_time_min` | Tiempo en minutos |
-| `chat_message` | Texto del mensaje o chat wheel resuelto |
-| `chat_type` | Tipo de mensaje (ej. `chatwheel`) |
-| `chat_is_chatwheel` | 1 si es chat wheel, 0 si no |
-| `chat_wheel_id` | ID del chat wheel (si aplica) |
-| `sender_hero_id` | ID del héroe que envió el mensaje |
-| `sender_hero_name` | Nombre del héroe |
-| `sender_slot` | Slot del emisor |
-| `sender_player_slot` | `player_slot` del emisor |
-| `has_replay_data` | 1 si hay datos de replay |
-| `unparseable` | 1 si es no parseable |
-
-### `kills.csv`
-
-Campos (`KILL_FIELDNAMES`):
-
-| Campo | Descripción |
-|-------|-------------|
-| `match_id` | ID de la partida |
-| `kill_time` | Tiempo de la kill en segundos |
-| `kill_time_min` | Tiempo en minutos |
-| `killer_hero_id` | ID del héroe asesino |
-| `killer_hero_name` | Nombre del asesino |
-| `victim_hero_id` | ID del héroe víctima |
-| `victim_hero_name` | Nombre de la víctima |
-| `rampage_time` | Tiempo de inicio del rampage detectado |
-| `rampage_time_min` | Rampage time en minutos |
-| `is_rampage_kill` | 1 si la kill pertenece al rampage |
-| `has_replay_data` | 1 si hay datos de replay |
-| `unparseable` | 1 si es no parseable |
-
-### Excel
-
-- Hojas: `Chats`, `Kills`.
-- Estilo dark-mode con encabezado gris (`#334155`) y texto blanco.
-- Filas coloreadas alternando verde claro/oscuro por partida.
-- Auto-filtro y paneles congelados.
+- `chats.csv` y `kills.csv` — ver `docs/csv_format.md` para el detalle de columnas.
+- `match_ids_YYYY-MM-DD.csv` — una columna `match_id`, una fila por ID. Se sube a Drive.
+- `parse_jobs_YYYY-MM-DD.csv` — `match_id` + `job_id` (Tecsup). Solo local.
+- Excel `rampage_export_YYYY-MM-DD.xlsx` — hojas `Chats` y `Kills` con estilos (encabezado `#334155`, alternancia de verdes por match, auto-filtro, fila congelada).
 
 ---
 
-## 11. Clases y funciones principales
-
-### Clases principales
+## 11. Clases principales
 
 | Clase | Archivo | Responsabilidad |
 |-------|---------|-----------------|
 | `Config` | `config.py` | Centralizar configuración |
 | `Database` | `database.py` | Conexión, inicialización y migraciones |
-| `ServiceFactory` | `main.py` | Inyección de dependencias |
+| `ServiceFactory` | `cli/factory.py` | Inyección de dependencias |
 | `StratzClient` | `api/client.py` | Llamadas GraphQL a Stratz |
 | `OpenDotaClient` | `api/opendota_client.py` | Llamadas REST a OpenDota |
-| `StratzApiError` | `api/client.py` | Error de API Stratz |
-| `RateLimitError` | `api/opendota_client.py` | Rate limit de OpenDota |
-| `HeroService` | `services/hero_service.py` | Sincronización de héroes |
-| `ChatWheelService` | `services/chat_wheel_service.py` | Sincronización de chat wheels |
-| `RampageService` | `services/rampage_service.py` | Búsqueda de rampages |
-| `TopHeroesService` | `services/top_heroes_service.py` | Búsqueda por top héroes/jugadores |
-| `SpecificTopService` | `services/specific_top_service.py` | Búsqueda específica por héroe |
-| `ParseService` | `services/parse_service.py` | Parseo de replays |
-| `ExportService` | `services/export_service.py` | Exportación CSV/Excel |
+| `ReplayStore` | `core/replay_store.py` | Archivos JSON de replay |
+| `DailyHarvestService` | `services/discovery/daily_harvest_service.py` | Cosecha diaria de IDs |
+| `ParseService` | `services/parse_service.py` | Parseo de replays + flujo CSV/Drive |
+| `ExportService` | `services/export_service.py` | Exportación CSV/Excel + match_ids |
+| `AnalysisService` | `services/analysis_service.py` | Ranking combinado de rampages |
+| `DriveService` | `services/drive_service.py` | Compartir match_ids_*.csv por Drive |
 | `HeroRepository` | `repositories/hero_repository.py` | Acceso a tabla `heroes` |
 | `MatchRepository` | `repositories/match_repository.py` | Acceso a `rampage_matches`, `match_details`, `export_log` |
 | `ChatWheelRepository` | `repositories/chat_wheel_repository.py` | Acceso a tabla `chat_wheels` |
 
-### Funciones principales
-
-- `main()` → punto de entrada.
-- `show_main_menu()`, `show_search_menu()`, `show_parse_menu()`, `show_export_menu()` → menús.
-- `run_search_menu()`, `run_parse_menu()`, `run_export_menu()` → dispatchers de menús.
-- `ServiceFactory` crea instancias de servicios.
-
 ---
 
-## 12. Responsabilidades por módulo
-
-| Módulo | Responsabilidad |
-|--------|-----------------|
-| `main.py` | Orquestación, menús, inyección de dependencias |
-| `config.py` | Configuración y validación de entorno |
-| `database.py` | Esquema SQLite y migraciones |
-| `api/client.py` | Cliente Stratz GraphQL |
-| `api/opendota_client.py` | Cliente OpenDota REST |
-| `api/queries.py` | Definición de queries GraphQL |
-| `services/hero_service.py` | Sincronizar catálogo de héroes |
-| `services/chat_wheel_service.py` | Sincronizar catálogo de chat wheels |
-| `services/rampage_service.py` | Buscar partidas por rampages |
-| `services/top_heroes_service.py` | Buscar partidas de top héroes/jugadores |
-| `services/specific_top_service.py` | Buscar partidas de héroes específicos |
-| `services/parse_service.py` | Parsear replays con OpenDota |
-| `services/export_service.py` | Exportar datos a CSV/Excel |
-| `repositories/hero_repository.py` | Persistencia de héroes |
-| `repositories/match_repository.py` | Persistencia de matches, detalles y logs |
-| `repositories/chat_wheel_repository.py` | Persistencia de chat wheels |
-
----
-
-## 13. Observaciones importantes
+## 12. Observaciones importantes
 
 1. **Sincronización lazy:** Héroes y chat wheels solo se sincronizan una vez (cuando las tablas están vacías).
-2. **Crecimiento incremental:** `rampage_matches` usa `UNIQUE(hero_id, match_id)`, por lo que re-ejecutar no duplica matches.
-3. **Parseo con estado:** El flujo de parseo maneja estados (`pending` → `queued`/`parsing` → `done`/`failed`) y es resumible.
-4. **Manejo de rate limits:** OpenDota tiene pausa de 1s y manejo de 429; Stratz usa `cloudscraper` y retries.
+2. **Crecimiento incremental:** `rampage_matches` usa `UNIQUE(hero_id, match_id)`; la cosecha además deduplica globalmente por `match_id`.
+3. **Parseo con estado:** `pending` → `queued`/`parsing` → `done`/`failed`/`unparseable`, resumible entre ejecuciones.
+4. **Manejo de rate limits:** OpenDota con delay de 0.65s, manejo de 429 y pausa larga tras 429 consecutivos; Stratz usa `cloudscraper` y retries.
 5. **Límite de antigüedad:** Matches mayores a 8 días se marcan `unparseable`.
-6. **Exportación por día:** Los exports se organizan en carpetas `exports/YYYY-MM-DD/`.
-7. **Colores en Excel:** Alternancia de verdes por `match_id` para facilitar lectura.
+6. **JSON fuera de SQLite:** El JSON crudo de OpenDota vive en archivos por partida; la BD solo guarda el índice.
+7. **Drive solo para IDs:** Únicamente `match_ids_*.csv` se comparte por Drive; el resto de artefactos es local.
 8. **Detección de rampage:** 5 kills consecutivas dentro de una ventana de 18 segundos.
-9. **Sin tests ni linter:** El proyecto no tiene suite de tests, ni configuración de linting, ni CI.
+9. **Sin tests ni linter:** No hay suite de tests (solo scaffolding en `tests/`), ni linting, ni CI.
 10. **venv en repo:** El entorno virtual está comiteado según `AGENTS.md`.
-11. **Archivos ignorados:** `.env`, `data.db`, `exports/`, `__pycache__/`, `*.pyc`, `*.pyo`, `*.pyd`.
+11. **Archivos ignorados:** `.env`, `data.db`, `exports/`, `__pycache__/`, `data/drive_client_secret.json`, `data/drive_token.json`, etc.

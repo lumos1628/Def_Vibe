@@ -18,8 +18,9 @@ The project follows a layered architecture:
                │
 ┌──────────────▼──────────────────────┐
 │   Services (business logic)         │
-│  discovery/ (rampage, top, specific)│
-│  hero, chat_wheel, parse, export    │
+│  discovery/ (daily harvest, legacy) │
+│  hero, chat_wheel, parse, export,   │
+│  analysis, drive                    │
 └──────────────┬──────────────────────┘
                │
 ┌──────────────▼──────────────────────┐
@@ -34,12 +35,14 @@ The project follows a layered architecture:
                │
 ┌──────────────▼──────────────────────┐
 │   External APIs                     │
-│ Stratz GraphQL, OpenDota REST       │
+│ Stratz GraphQL, OpenDota REST,      │
+│ Google Drive API                    │
 └─────────────────────────────────────┘
 
 Shared utilities live in core/:
 - core/time.py       → timestamp parsing
 - core/models.py     → domain dataclasses
+- core/replay_store.py → per-match replay JSON files
 ```
 
 ## Layers
@@ -47,7 +50,7 @@ Shared utilities live in core/:
 ### `api/`
 
 - **`StratzClient`** (`api/client.py`) — wraps the Stratz GraphQL endpoint using `cloudscraper` to bypass Cloudflare and `requests` for retries.
-- **`OpenDotaClient`** (`api/opendota_client.py`) — wraps the OpenDota REST API with a 1 req/s delay, 429 handling, and exponential backoff.
+- **`OpenDotaClient`** (`api/opendota_client.py`) — wraps the OpenDota REST API with a 0.65 s delay between requests, 429 handling, and exponential backoff.
 - **`api/queries.py`** — stores all GraphQL query strings.
 
 ### `services/`
@@ -55,6 +58,9 @@ Shared utilities live in core/:
 - Encapsulate business logic.
 - Orchestrate API calls and repositories.
 - Implement long-running workflows (search, parse, export).
+- **`services/discovery/`** — match discovery: `DailyHarvestService` is the only one reachable from the menus; `RampageService`, `TopHeroesService`, and `SpecificTopService` remain as legacy code, wired in `ServiceFactory` but not exposed.
+- **`services/analysis_service.py`** — builds the combined rampage ranking (menu `4`) from the parsed replay files, without API calls.
+- **`services/drive_service.py`** — the only Google Drive integration: uploads/downloads/deletes the shared `match_ids_*.csv` (menu `1` upload + re-upload, menu `2` download + cleanup). Authenticates as the user via an Installed App OAuth flow. Degrades gracefully when unconfigured.
 
 ### `repositories/`
 
@@ -87,6 +93,7 @@ Shared utilities live in core/:
 
 - **`core/time.py`** — shared timestamp parsing (`parse_timestamp`).
 - **`core/models.py`** — domain dataclasses (`Hero`, `Match`, `ChatWheel`, etc.).
+- **`core/replay_store.py`** — writes and reads the raw OpenDota JSON per match at `data/replays/{match_date}/{match_id}.json`; `match_details` in the database is only an index to these files.
 
 ## Design principles
 

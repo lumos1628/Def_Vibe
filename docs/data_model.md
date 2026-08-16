@@ -83,22 +83,24 @@ Catalog of chat wheel messages.
 
 ### `match_details`
 
-Stores the raw JSON response from OpenDota for each parsed match.
+Index of parsed match data. The full OpenDota JSON is stored in per-match files under `data/replays/{match_date}/{match_id}.json` (via `core/replay_store.py`); this table only tracks the file location.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `match_id` | `INTEGER PRIMARY KEY` | Dota 2 match ID |
-| `opendota_data` | `TEXT NOT NULL` | Full JSON string |
+| `file_path` | `TEXT NOT NULL` | Relative path to the JSON file (e.g. `data/replays/2026-08-11/76561198234567890.json`) |
+| `match_date` | `TEXT NOT NULL` | Match date (`YYYY-MM-DD`) derived from `start_time`; `unknown` when missing |
 | `parsed_at` | `TEXT NOT NULL` | When the data was saved |
 
 ## Migrations
 
 `Database.migrate()` is responsible for:
 
+- Migrating legacy `match_details` rows from an inline `opendota_data` JSON blob to per-match files (dumping each row to `data/replays/` and dropping the column).
 - Adding missing columns to `rampage_matches` (`parsed`, `has_replay_data`, `data_verified`, `parse_requested_at`, `parse_request_count`, `parse_job_id`, `parse_status`, `last_parse_attempt_at`, `unparseable`).
-- Creating the `match_details` table.
+- Creating the `match_details` table (index + file pointer).
 - Creating missing indexes.
-- Backfilling `has_replay_data` from existing `match_details` JSON.
+- Backfilling `has_replay_data` from existing `match_details` files.
 - Backfilling `parse_status` based on existing flags.
 - Backfilling `data_verified` based on existing parse state.
 - Resetting `unparseable` for recent matches so they can be retried.

@@ -8,9 +8,9 @@ Reads parsed match data from the database and generates daily reports: two CSV f
 
 ### `class ExportService`
 
-#### `__init__(hero_repository, match_repository, chat_wheel_repository)`
+#### `__init__(hero_repository, match_repository, chat_wheel_repository, drive_service=None)`
 
-Loads the hero list and builds lookup tables for hero names and short-name-to-ID mappings.
+Loads the hero list and builds lookup tables for hero names and short-name-to-ID mappings. The optional `drive_service` is only used by `export_match_ids_csv()` to upload the CSV to Drive.
 
 #### `export_chat_kills(output_path, today) -> tuple[Path, Path, Path]`
 
@@ -19,6 +19,10 @@ Main export function. Returns paths to `chats.csv`, `kills.csv`, and the Excel f
 #### `export_chat_kills_csv(output_path) -> Path`
 
 Convenience wrapper that returns only the Excel path.
+
+#### `export_match_ids_csv(match_ids, today) -> Path`
+
+Writes `exports/match_ids_YYYY-MM-DD.csv` with one `match_id` per row and, when a `drive_service` is configured, uploads it to the shared Google Drive folder.
 
 #### `reexport_parsed_today(output_path) -> tuple[Path, Path, Path]`
 
@@ -44,19 +48,22 @@ Clears today's export log entries for matches parsed today and re-runs the expor
 - `repositories.hero_repository.HeroRepository`
 - `repositories.match_repository.MatchRepository`
 - `repositories.chat_wheel_repository.ChatWheelRepository`
+- `services.drive_service.DriveService` (optional)
 - `config.Config`
 
 ## Inputs
 
-- Parsed match data from `match_details`.
+- Parsed match data read from per-match replay files (`data/replays/`).
 - Hero catalog and chat wheel catalog from the database.
 - Optional `output_path` and `today` override.
+- Match IDs from a daily harvest (for `export_match_ids_csv()`).
 
 ## Outputs
 
 - `exports/YYYY-MM-DD/chats.csv`
 - `exports/YYYY-MM-DD/kills.csv`
 - `exports/YYYY-MM-DD/rampage_export_YYYY-MM-DD.xlsx`
+- `exports/match_ids_YYYY-MM-DD.csv` (+ upload to Drive when configured)
 - Records in `export_log`.
 
 ## Usage example

@@ -1,5 +1,7 @@
 # Cleanup Report
 
+> **Status: APPLIED.** The cleanups identified in this report were executed as part of the refactor: dead code was removed (`Config.EXPORT_WINDOW_SECONDS`, `MatchRepository.count_by_hero()`, `list_all()`, `list_all_match_details()`, `ChatWheelRepository.list_all()`), the duplicated `_parse_timestamp()` was centralized in `core/time.py`, the top player/match logic was unified through `services/discovery/base.py` (BaseDiscoveryService), and the parse menu wording was fixed. This file is kept for historical reference.
+
 ## Summary
 
 Several elements were identified that could be cleaned up or refactored. None of them affect the current functionality of the program, but addressing them would reduce technical debt and improve maintainability.
@@ -149,4 +151,4 @@ The `__init__.py` files are empty but are required for the directories to be Pyt
 
 ## Note
 
-The cleanups identified in this report have **not** been applied. They are documented here for future execution.
+The cleanups identified in this report **have been applied** (see the status banner at the top). This file is kept for historical reference.
