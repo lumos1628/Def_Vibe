@@ -3,6 +3,15 @@
 
 # Base de datos local
 data.db
+data.db.bak
+
+# Replays crudos
+data/replays/
+
+# Credenciales de Google Drive
+data/drive_credentials.json
+data/drive_client_secret.json
+data/drive_token.json
 
 # Exportaciones generadas
 exports/

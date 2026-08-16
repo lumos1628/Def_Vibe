@@ -3,6 +3,7 @@ import json
 import sqlite3
 from pathlib import Path
 from config import Config
+from core.replay_store import ReplayStore
 
 class Database:
     def __init__(self, db_path: Path = Config.DB_PATH):
@@ -63,6 +64,8 @@ class Database:
             """)
 
     def migrate(self) -> None:
+        self._migrate_match_details_to_files()
+
         with self.get_connection() as conn:
             cursor = conn.execute("PRAGMA table_info(rampage_matches)")
             columns = [row[1] for row in cursor.fetchall()]
@@ -110,15 +113,17 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_rampage_last_attempt ON rampage_matches(last_parse_attempt_at)"
             )
 
-            # Backfill has_replay_data from existing match_details JSON
+            # Backfill has_replay_data from existing match_details files
             if self.table_exists("match_details"):
+                store = ReplayStore()
                 cursor = conn.execute(
-                    "SELECT match_id, opendota_data FROM match_details"
+                    "SELECT match_id, file_path FROM match_details"
                 )
-                for match_id, data_json in cursor.fetchall():
-                    try:
-                        data = json.loads(data_json)
-                    except json.JSONDecodeError:
+                for match_id, file_path in cursor.fetchall():
+                    if not file_path:
+                        continue
+                    data = store.load(Path(file_path))
+                    if data is None:
                         continue
                     players = data.get("players") or []
                     has_kills_log = any(
@@ -193,7 +198,8 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_rampage_parsed ON rampage_matches(parsed);
                 CREATE TABLE IF NOT EXISTS match_details (
                     match_id INTEGER PRIMARY KEY,
-                    opendota_data TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    match_date TEXT NOT NULL,
                     parsed_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS export_log (
@@ -214,6 +220,63 @@ class Database:
                     synced_at TEXT NOT NULL
                 );
             """)
+
+    def _migrate_match_details_to_files(self) -> None:
+        """Migrate inline JSON blobs in `match_details` to per-match files.
+
+        Old rows have an `opendota_data` column with the full JSON. This dumps
+        each row to `data/replays/` and replaces the column with `file_path`
+        and `match_date`. Idempotent: safe to re-run if interrupted.
+        """
+        if not self.table_exists("match_details"):
+            return
+        with self.get_connection() as conn:
+            cursor = conn.execute("PRAGMA table_info(match_details)")
+            columns = [row[1] for row in cursor.fetchall()]
+        if "opendota_data" not in columns:
+            return
+
+        print("\nMigrando match_details: volcando JSON a archivos de replay...")
+        with self.get_connection() as conn:
+            if "file_path" not in columns:
+                conn.execute("ALTER TABLE match_details ADD COLUMN file_path TEXT")
+            if "match_date" not in columns:
+                conn.execute("ALTER TABLE match_details ADD COLUMN match_date TEXT")
+
+            store = ReplayStore()
+            updates: list[tuple[str, str, int]] = []
+            cursor = conn.execute(
+                "SELECT match_id, file_path, opendota_data, parsed_at FROM match_details"
+            )
+            for match_id, file_path, data_json, _parsed_at in cursor:
+                if file_path is not None:
+                    continue
+                try:
+                    data = json.loads(data_json)
+                except json.JSONDecodeError:
+                    continue
+                path = store.save(match_id, data)
+                updates.append((str(path), store.match_date(data), match_id))
+            conn.executemany(
+                "UPDATE match_details SET file_path = ?, match_date = ? WHERE match_id = ?",
+                updates,
+            )
+            missing = conn.execute(
+                """
+                SELECT COUNT(*) FROM match_details
+                WHERE file_path IS NULL AND opendota_data IS NOT NULL
+                """
+            ).fetchone()[0]
+
+        if missing == 0:
+            with self.get_connection() as conn:
+                conn.execute("ALTER TABLE match_details DROP COLUMN opendota_data")
+            print(f"✓ {len(updates)} partida(s) migradas a archivos en {Config.REPLAY_DATA_DIR}.")
+        else:
+            print(
+                f"⚠ {missing} fila(s) sin migrar (JSON inválido). "
+                "Se conserva la columna opendota_data y se reintentará en el próximo arranque."
+            )
 
     def table_exists(self, name: str) -> bool:
         with self.get_connection() as conn:

@@ -4,13 +4,16 @@ from database import Database
 from repositories.chat_wheel_repository import ChatWheelRepository
 from repositories.hero_repository import HeroRepository
 from repositories.match_repository import MatchRepository
+from services.analysis_service import AnalysisService
 from services.chat_wheel_service import ChatWheelService
 from services.export_service import ExportService
 from services.hero_service import HeroService
 from services.parse_service import ParseService
+from services.discovery.daily_harvest_service import DailyHarvestService
 from services.discovery.rampage_service import RampageService
 from services.discovery.specific_top_service import SpecificTopService
 from services.discovery.top_heroes_service import TopHeroesService
+from services.drive_service import DriveService
 
 
 class ServiceFactory:
@@ -21,6 +24,7 @@ class ServiceFactory:
         self.hero_repo = HeroRepository(self.db)
         self.match_repo = MatchRepository(self.db)
         self.chat_wheel_repo = ChatWheelRepository(self.db)
+        self.drive_service = DriveService()
 
     def hero_service(self) -> HeroService:
         return HeroService(self.client, self.hero_repo)
@@ -37,8 +41,14 @@ class ServiceFactory:
     def specific_top_service(self) -> SpecificTopService:
         return SpecificTopService(self.client, self.hero_repo, self.match_repo)
 
+    def daily_harvest_service(self) -> DailyHarvestService:
+        return DailyHarvestService(self.client, self.hero_repo, self.match_repo)
+
     def parse_service(self) -> ParseService:
-        return ParseService(self.opendota_client, self.match_repo)
+        return ParseService(self.opendota_client, self.match_repo, self.drive_service)
 
     def export_service(self) -> ExportService:
-        return ExportService(self.hero_repo, self.match_repo, self.chat_wheel_repo)
+        return ExportService(self.hero_repo, self.match_repo, self.chat_wheel_repo, self.drive_service)
+
+    def analysis_service(self) -> AnalysisService:
+        return AnalysisService(self.hero_repo, self.match_repo, self.chat_wheel_repo)

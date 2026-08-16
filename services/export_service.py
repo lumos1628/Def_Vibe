@@ -10,6 +10,7 @@ from config import Config
 from repositories.chat_wheel_repository import ChatWheelRepository
 from repositories.hero_repository import HeroRepository
 from repositories.match_repository import MatchRepository
+from services.drive_service import DriveService
 
 
 class ExportService:
@@ -49,10 +50,12 @@ class ExportService:
         hero_repository: HeroRepository,
         match_repository: MatchRepository,
         chat_wheel_repository: ChatWheelRepository,
+        drive_service: DriveService | None = None,
     ):
         self.hero_repo = hero_repository
         self.match_repo = match_repository
         self.chat_wheel_repo = chat_wheel_repository
+        self.drive_service = drive_service
         heroes = self.hero_repo.list_all()
         self.hero_names = {h["id"]: h["display_name"] for h in heroes}
         self.hero_short_to_id = {
@@ -178,6 +181,23 @@ class ExportService:
     def export_chat_kills_csv(self, output_path: Path | None = None) -> Path:
         _, _, xlsx_path = self.export_chat_kills(output_path)
         return xlsx_path
+
+    def export_match_ids_csv(
+        self, match_ids: list[int], today: str | None = None
+    ) -> Path:
+        """Exports a CSV with one match ID per row, named with today's date."""
+        today = today or datetime.now(timezone.utc).date().isoformat()
+        csv_path = Config.EXPORT_DIR / f"match_ids_{today}.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fieldnames = ["match_id"]
+        rows = [{"match_id": match_id} for match_id in match_ids]
+        self._write_csv(csv_path, fieldnames, rows)
+
+        print(f"\n✓ Exportadas {len(rows)} IDs a {csv_path}")
+        if self.drive_service is not None:
+            self.drive_service.upload(csv_path)
+        return csv_path
 
     def reexport_parsed_today(self, output_path: Path | None = None) -> tuple[Path, Path, Path]:
         today = datetime.now(timezone.utc).date().isoformat()

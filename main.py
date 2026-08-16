@@ -1,5 +1,11 @@
 from cli.factory import ServiceFactory
-from cli.menus import show_main_menu, run_export_menu, run_parse_menu, run_search_menu
+from cli.menus import (
+    show_main_menu,
+    run_analysis_menu,
+    run_export_menu,
+    run_parse_menu,
+    run_search_menu,
+)
 from config import Config
 
 
@@ -23,6 +29,8 @@ def main() -> None:
         elif choice == 3:
             run_export_menu(factory)
         elif choice == 4:
+            run_analysis_menu(factory)
+        elif choice == 5:
             print("Saliendo...")
             break
 
